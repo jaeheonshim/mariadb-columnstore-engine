@@ -8,6 +8,8 @@
 #
 --source ../include/have_columnstore.inc
 #
+SET @@session.time_zone = "+00:00";
+#
 --disable_warnings
 DROP DATABASE IF EXISTS tpch1m;
 DROP DATABASE IF EXISTS tpch1;
