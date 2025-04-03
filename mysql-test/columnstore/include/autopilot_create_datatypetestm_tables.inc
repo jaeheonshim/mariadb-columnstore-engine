@@ -2,6 +2,7 @@
 drop table if exists datatypetestm;
 drop table if exists datatypetestm1;
 drop table if exists datatypetestm2;
+SET @@session.time_zone = "+00:00";
 --enable_warnings
 Create table datatypetestm (
 CIDX 		INTEGER,
