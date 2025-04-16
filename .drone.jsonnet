@@ -772,6 +772,9 @@ local Pipeline(branch, platform, event, arch='amd64', server='10.6-enterprise') 
              },
              commands: [
                'cd /mdb/' + builddir,
+               'echo test!',
+               'pwd',
+               'ls -R',
                testPreparation(platform),
                testRun(platform),
              ],
