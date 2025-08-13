@@ -7,7 +7,8 @@ local platforms = {
 local archs = ["amd64"];
 local builddir = "verylongdirnameforverystrangecpackbehavior";
 
-local get_build_command(command) = "bash ./mdb/" + builddir + "/storage/columnstore/columnstore/build/" + command + " ";
+local mdb_path = "/tmp/mdb";
+local get_build_command(command) = "bash " + mdb_path + "/" + builddir + "/storage/columnstore/columnstore/build/" + command + " ";
 
 local clang(version) = [
   get_build_command("install_clang_deb.sh " + version),
@@ -57,7 +58,7 @@ local echo_running_on = ["echo running on ${CI_RUNNER_ID}", make_clickable_link(
 
 local jobName(step, params) = step + "_" + std.join("_", [x for x in [(if params.branch == "**" then "any" else params.branch), std.strReplace(std.strReplace(params.platform, ":", ""), "/", "-"), params.event, params.arch, std.strReplace(params.server, ".", "_"), params.customParams, params.customEnv] if x != ""]);
 
-local generateJob(stepName, image, script, dependsOn, params, variables={}, artifacts={ paths: ["./mdb"] }, services=[]) = {
+local generateJob(stepName, image, script, dependsOn, params, variables={}, artifacts={ paths: [mdb_path] }, services=[]) = {
   [jobName(stepName, params)]: {
     stage: stepName,
     image: if image == "alpine/git:2.49.0" then { name: image, entrypoint: [""] } else image,
@@ -104,13 +105,13 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
     "amazon/aws-cli:2.22.30",
     [
       "sleep 10",
-      "ls -lR ./mdb/" + builddir + "/" + result,
-      "source ./mdb/" + builddir + "/storage/columnstore/columnstore/VERSION && " +
+      "ls -lR " + mdb_path + "/" + builddir + "/" + result,
+      "source " + mdb_path + "/" + builddir + "/storage/columnstore/columnstore/VERSION && " +
       "CURRENT_VERSION=${COLUMNSTORE_VERSION_MAJOR}.${COLUMNSTORE_VERSION_MINOR}.${COLUMNSTORE_VERSION_PATCH} && " +
       "aws s3 rm s3://cspkg/" + branchp + eventp + "/" + server + "/" + arch + "/" + result + "/ " +
       "--recursive --exclude \"*\" --include \"*columnstore*.deb\" --include \"*columnstore*.rpm\" " +
       "--exclude \"*${CURRENT_VERSION}*.deb\" --exclude \"*${CURRENT_VERSION}*.rpm\" --only-show-errors",
-      "aws s3 sync ./mdb/" + builddir + "/" + result + "/ s3://cspkg/" + branchp + eventp + "/" + server + "/" + arch + "/" + result + " --only-show-errors",
+      "aws s3 sync " + mdb_path + "/" + builddir + "/" + result + "/ s3://cspkg/" + branchp + eventp + "/" + server + "/" + arch + "/" + result + " --only-show-errors",
       'echo "Data uploaded to: ' + publish_pkg_url + '"',
       make_clickable_link(publish_pkg_url)
     ],
@@ -152,25 +153,25 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
       "echo $SERVER_REF",
       "echo $SERVER_REMOTE",
       "git config --global credential.helper \"store --file=$HOME/.git-credentials\"",
-      "printf 'https://%s:%s@github.com\n' \"$GITHUB_USER\" \"$GITHUB_TOKEN\" > \"$HOME/.git-credentials\"",
+      "printf 'https://%s:%s@github.com\\n' \"$GITHUB_USER\" \"$GITHUB_TOKEN\" > \"$HOME/.git-credentials\"",
       "chmod 600 \"$HOME/.git-credentials\"",
-      "mkdir -p ./mdb/" + builddir + " && cd ./mdb/" + builddir,
+      "mkdir -p " + mdb_path + "/" + builddir + " && cd " + mdb_path + "/" + builddir,
       'git config --global url."https://github.com/".insteadOf git@github.com:',
       'git -c submodule."storage/rocksdb/rocksdb".update=none -c submodule."wsrep-lib".update=none -c submodule."storage/columnstore/columnstore".update=none clone --recurse-submodules --depth 200 --branch $SERVER_REF $SERVER_REMOTE .',
       "git reset --hard $SERVER_SHA",
       "git rev-parse --abbrev-ref HEAD && git rev-parse HEAD",
       "git config cmake.update-submodules no",
       "rm -rf storage/columnstore/columnstore",
-      "cp -r $CI_PROJECT_DIR ./mdb/" + builddir + "/storage/columnstore/columnstore"
+      "cp -r $CI_PROJECT_DIR storage/columnstore/columnstore"
     ], ["submodules"], params, { SERVER_REF: server, SERVER_REMOTE: server_remote, SERVER_SHA: server }) +
     generateJob("build", img, [
-      "mkdir ./mdb/" + builddir + "/" + result
+      "mkdir " + mdb_path + "/" + builddir + "/" + result
     ] + customEnvCommands(customBuildEnvCommandsMapKey, builddir) + [
       'bash -c "set -o pipefail && ' + get_build_command("bootstrap_mcs.sh") +
       "--build-type RelWithDebInfo --distro " + platform + " --build-packages --install-deps --sccache " +
-      "--build-path ./mdb/" + builddir + "/builddir " + customBootstrapParamsForExisitingPipelines(platform) + " " +
+      "--build-path " + mdb_path + "/" + builddir + "/builddir " + customBootstrapParamsForExisitingPipelines(platform) + " " +
       customBuildFlags(customBootstrapParamsKey) + " | " + get_build_command("ansi2txt.sh") +
-      "./mdb/" + builddir + "/" + result + '/build.log "'
+      mdb_path + "/" + builddir + "/" + result + '/build.log "'
     ], ["clone-mdb"], params, {
       DEBIAN_FRONTEND: "noninteractive",
       AWS_ACCESS_KEY_ID: "$AWS_ACCESS_KEY_ID",
@@ -187,9 +188,9 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
     ], ["clone-mdb"], params, { DEBIAN_FRONTEND: "noninteractive" }) +
     generateJob("createrepo", img, [
       get_build_command("createrepo.sh") + " --result " + result
-    ], ["build", "cmapi build"], params) +
+    ], ["build", "cmapi build"], params, {}) +
     generateJob("pkg", "alpine/git:2.49.0", [
-      "cd ./mdb/" + builddir,
+      "cd " + mdb_path + "/" + builddir,
       'echo "engine: $CI_COMMIT_SHA" > buildinfo.txt',
       'echo "server: $(git rev-parse HEAD)" >> buildinfo.txt',
       'echo "buildNo: $CI_PIPELINE_IID" >> buildinfo.txt',
@@ -197,11 +198,11 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
       'echo "serverRepo: $SERVER_REMOTE" >> buildinfo.txt',
       'echo "engineBranch: $CI_COMMIT_REF_NAME" >> buildinfo.txt',
       'echo "engineRepo: ${CI_SERVER_URL}/${CI_PROJECT_PATH}" >> buildinfo.txt',
-      "mv buildinfo.txt ./%s/" % result,
-      "yes | cp -vr ./%s/. $CI_PROJECT_DIR/%s/" % [result, result],
+      "mv buildinfo.txt ./" + result,
+      "yes | cp -vr ./" + result + "/. $CI_PROJECT_DIR/" + result,
       "ls -l $CI_PROJECT_DIR/" + result,
       'echo "check columnstore package:"',
-      "ls -l $CI_PROJECT_DIR/%s | grep columnstore" % result
+      "ls -l $CI_PROJECT_DIR/" + result + " | grep columnstore"
     ], ["createrepo"], params, { SERVER_REF: server, SERVER_REMOTE: server_remote }) +
     publish("cmapi build") +
     publish() +
@@ -209,19 +210,19 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
     generateJob("smoke", "docker:28.2.2", [
       prepareTestContainer(getContainerName("smoke"), result, true),
       get_build_command("run_smoke.sh") + ' --container-name ' + getContainerName("smoke")
-    ], ["publish pkg"], params, {}, { paths: ["./mdb"] }, ["docker:dind"]) +
+    ], ["publish pkg"], params, {}, { paths: [mdb_path] }, ["docker:dind"]) +
     generateJob("smokelog", "docker:28.2.2", [
       reportTestStage(getContainerName("smoke"), result, "smoke")
-    ], ["smoke"], params, {}, { paths: ["./mdb"] }, ["docker:dind"]) +
+    ], ["smoke"], params, {}, { paths: [mdb_path] }, ["docker:dind"]) +
     publish("smokelog") +
     generateJob("cmapi test", "docker:git", [
       prepareTestContainer(getContainerName("cmapi"), result, true),
       "apk add bash && " + get_build_command("run_cmapi_test.sh") +
       " --container-name " + getContainerName("cmapi") + " --pkg-format " + pkg_format
-    ], ["publish cmapi build"], params, { PYTHONPATH: "/usr/share/columnstore/cmapi/deps" }, { paths: ["./mdb"] }, ["docker:dind"]) +
+    ], ["publish cmapi build"], params, { PYTHONPATH: "/usr/share/columnstore/cmapi/deps" }, { paths: [mdb_path] }, ["docker:dind"]) +
     generateJob("cmapilog", "docker:28.2.2", [
       reportTestStage(getContainerName("cmapi"), result, "cmapi")
-    ], ["cmapi test"], params, {}, { paths: ["./mdb"] }, ["docker:dind"]) +
+    ], ["cmapi test"], params, {}, { paths: [mdb_path] }, ["docker:dind"]) +
     publish("cmapilog") +
     (if platform == "rockylinux:8" && arch == "amd64" && customBootstrapParamsKey == "gcc-toolset"
       then generateJob("dockerfile", "alpine/git:2.49.0", [
@@ -246,7 +247,7 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
           "-f docker/Dockerfile docker",
           "docker push mariadb/enterprise-columnstore-dev:" + container_tags[0]
         ] + (if event == "cron" then ["docker tag mariadb/enterprise-columnstore-dev:" + container_tags[0] + " mariadb/enterprise-columnstore-dev:" + container_tags[1], "docker push mariadb/enterprise-columnstore-dev:" + container_tags[1]] else []),
-        ["dockerfile"], params, {}, { paths: ["./mdb"] }, ["docker:dind"]) +
+        ["dockerfile"], params, {}, { paths: [mdb_path] }, ["docker:dind"]) +
         generateJob("mtr", "docker:28.2.2", [
           "echo $DOCKER_PASSWORD | docker login --username $DOCKER_LOGIN --password-stdin",
           "apk add bash && " + get_build_command("run_multi_node_mtr.sh") +
@@ -255,17 +256,17 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
           DOCKER_LOGIN: "$DOCKERHUB_USER",
           DOCKER_PASSWORD: "$DOCKERHUB_PASSWORD",
           MCS_IMAGE_NAME: "mariadb/enterprise-columnstore-dev:" + container_tags[0]
-        }, { paths: ["./mdb"] }, ["docker:dind"])
+        }, { paths: [mdb_path] }, ["docker:dind"])
       else generateJob("mtr", "docker:git", [
           prepareTestContainer(getContainerName("mtr"), result, true),
           'MTR_SUITE_LIST=$([ "$MTR_FULL_SUITE" == true ] && echo "' + mtr_full_set + '" || echo "$MTR_SUITE_LIST")',
           'apk add bash && ' + get_build_command("run_mtr.sh") +
           ' --container-name ' + getContainerName("mtr") + ' --distro ' + platform +
           ' --suite-list ${MTR_SUITE_LIST} --triggering-event ' + event
-        ], ["smoke"], params, { MTR_SUITE_LIST: mtr_suite_list, MTR_FULL_SUITE: "false" }, { paths: ["./mdb"] }, ["docker:dind"]) +
+        ], ["smoke"], params, { MTR_SUITE_LIST: mtr_suite_list, MTR_FULL_SUITE: "false" }, { paths: [mdb_path] }, ["docker:dind"]) +
         generateJob("mtrlog", "docker:28.2.2", [
           reportTestStage(getContainerName("mtr"), result, "mtr")
-        ], ["mtr"], params, {}, { paths: ["./mdb"] }, ["docker:dind"]) +
+        ], ["mtr"], params, {}, { paths: [mdb_path] }, ["docker:dind"]) +
         publish("mtrlog")
     ) +
     std.foldl(function(acc, i) acc + generateJob(regression_tests[i], "docker:git", [
@@ -280,10 +281,10 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
         REGRESSION_BRANCH_REF: "${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:-$CI_COMMIT_REF_NAME}",
         REGRESSION_REF_AUX: branch_ref,
         REGRESSION_TIMEOUT: "$REGRESSION_TIMEOUT"
-      }, { paths: ["./mdb"] }, ["docker:dind"]), indexes(regression_tests), {}) +
+      }, { paths: [mdb_path] }, ["docker:dind"]), indexes(regression_tests), {}) +
     generateJob("regressionlog", "docker:28.2.2", [
       reportTestStage(getContainerName("regression"), result, "regression")
-    ], [regression_tests[std.length(regression_tests) - 1]], params, {}, { paths: ["./mdb"] }, ["docker:dind"]) +
+    ], [regression_tests[std.length(regression_tests) - 1]], params, {}, { paths: [mdb_path] }, ["docker:dind"]) +
     publish("regressionlog") +
     (if event == "cron" then publish("regressionlog latest", "latest") else {})
 };
