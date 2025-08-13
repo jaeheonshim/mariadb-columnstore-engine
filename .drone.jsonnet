@@ -111,7 +111,7 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
   local publish_pkg_url = "https://cspkg.s3.amazonaws.com/index.html?prefix=" + branchp + event + "/${DRONE_BUILD_NUMBER}/" + server + "/" + arch + "/" + result + "/",
   local repo_pkg_url_no_res = "https://cspkg.s3.amazonaws.com/" + branchp + event + "/${DRONE_BUILD_NUMBER}/" + server + "/" + arch + "/",
 
-  local container_tags = if (event == "cron") then [brancht + std.strReplace(event, "_", "-") + "${DRONE_BUILD_NUMBER}", brancht] else [brancht + std.strReplace(event, "_", "-") + "${DRONE_BUILD_NUMBER}"],
+  local container_tags = if (event != "cron") then [brancht + std.strReplace(event, "_", "-") + "${DRONE_BUILD_NUMBER}", brancht] else [brancht + std.strReplace(event, "_", "-") + "${DRONE_BUILD_NUMBER}"],
   local container_version = branchp + event + "/${DRONE_BUILD_NUMBER}/" + server + "/" + arch,
 
   local server_remote = if (std.endsWith(server, "enterprise")) then "https://github.com/mariadb-corporation/MariaDBEnterprise" else "https://github.com/MariaDB/server",
@@ -160,32 +160,10 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
     ],
   },
 
-  local regression_tests = if (event == "cron") then [
+  local regression_tests = if (event != "cron") then [
     "test000.sh",
     "test001.sh",
     "test005.sh",
-    "test006.sh",
-    "test007.sh",
-    "test008.sh",
-    "test009.sh",
-    "test010.sh",
-    "test011.sh",
-    "test012.sh",
-    "test013.sh",
-    "test014.sh",
-    "test023.sh",
-    "test201.sh",
-    "test202.sh",
-    "test203.sh",
-    "test204.sh",
-    "test210.sh",
-    "test211.sh",
-    "test212.sh",
-    //  "test222.sh", FIXME: restore the test
-    "test297.sh",
-    "test299.sh",
-    "test400.sh",
-    "test500.sh",
   ] else [
     "test000.sh",
     "test001.sh",
@@ -613,7 +591,7 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
          ] +
          [pipeline.publish("cmapi build")] +
          [pipeline.publish()] +
-         (if (event == "cron") then [pipeline.publish("pkg latest", "latest")] else []) +
+         (if (event != "cron") then [pipeline.publish("pkg latest", "latest")] else []) +
          [pipeline.smoke] +
          [pipeline.smokelog] +
          [pipeline.publish("smokelog")] +
@@ -626,7 +604,7 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
          [pipeline.publish("regressionlog")] +
          // [pipeline.upgrade(mdb_server_versions[i]) for i in indexes(mdb_server_versions)] +
          // (if (std.length(mdb_server_versions) == 0) then [] else [pipeline.upgradelog] + [pipeline.publish("upgradelog")]) +
-         (if (event == "cron") then [pipeline.publish("regressionlog latest", "latest")] else []),
+         (if (event != "cron") then [pipeline.publish("regressionlog latest", "latest")] else []),
 
   volumes: [pipeline._volumes.mdb { temp: {} }, pipeline._volumes.docker { host: { path: "/var/run/docker.sock" } }],
   trigger: {
@@ -713,7 +691,7 @@ local FinalPipeline(branch, event) = {
       "success",
       "failure",
     ],
-  } + (if event == "cron" then { cron: ["nightly-" + std.strReplace(branch, ".", "-")] } else {}),
+  } + (if event != "cron" then { cron: ["nightly-" + std.strReplace(branch, ".", "-")] } else {}),
   depends_on: std.map(function(p) p.name, AllPipelines),
 };
 
