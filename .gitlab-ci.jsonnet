@@ -58,7 +58,7 @@ local echo_running_on = ["echo running on ${CI_RUNNER_ID}", make_clickable_link(
 
 local jobName(step, params) = step + "_" + std.join("_", [x for x in [(if params.branch == "**" then "any" else params.branch), std.strReplace(std.strReplace(params.platform, ":", ""), "/", "-"), params.event, params.arch, std.strReplace(params.server, ".", "_"), params.customParams, params.customEnv] if x != ""]);
 
-local generateJob(stepName, image, script, dependsOn, params, variables={}, artifacts={ paths: [mdb_path] }, services=[]) = {
+local generateJob(stepName, image, script, dependsOn, params, variables={}, artifacts={ paths: ["mdb"] }, services=[]) = {
   [jobName(stepName, params)]: {
     stage: stepName,
     image: if image == "alpine/git:2.49.0" then { name: image, entrypoint: [""] } else image,
@@ -67,6 +67,8 @@ local generateJob(stepName, image, script, dependsOn, params, variables={}, arti
     artifacts: artifacts,
     services: services,
     needs: [jobName(dep, params) for dep in dependsOn],
+    before_script: ["if [ -d $CI_PROJECT_DIR/mdb ]; then mv $CI_PROJECT_DIR/mdb " + mdb_path + "; fi"],
+    after_script: ["if [ -d " + mdb_path + " ]; then mv " + mdb_path + " $CI_PROJECT_DIR/mdb; fi"],
     rules: [
       {
         ["if"]: local source = if params.event == "merge_request" then "merge_request_event" else if params.event == "cron" then "schedule" else "push";
@@ -148,7 +150,7 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
       "git submodule update --init --recursive",
       "git config cmake.update-submodules no",
       "git rev-parse --abbrev-ref HEAD && git rev-parse HEAD"
-    ], [], params, {}) +
+    ], [], params, {}, {}) +
     generateJob("clone-mdb", "alpine/git:2.49.0", echo_running_on + [
       "echo $SERVER_REF",
       "echo $SERVER_REMOTE",
@@ -163,9 +165,9 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
       "git config cmake.update-submodules no",
       "rm -rf storage/columnstore/columnstore",
       "cp -r $CI_PROJECT_DIR storage/columnstore/columnstore"
-    ], ["submodules"], params, { SERVER_REF: server, SERVER_REMOTE: server_remote, SERVER_SHA: server }) +
+    ], ["submodules"], params, { SERVER_REF: server, SERVER_REMOTE: server_remote, SERVER_SHA: server }, { paths: ["mdb"] }) +
     generateJob("build", img, [
-      "mkdir " + mdb_path + "/" + builddir + "/" + result
+      "mkdir -p " + mdb_path + "/" + builddir + "/" + result
     ] + customEnvCommands(customBuildEnvCommandsMapKey, builddir) + [
       'bash -c "set -o pipefail && ' + get_build_command("bootstrap_mcs.sh") +
       "--build-type RelWithDebInfo --distro " + platform + " --build-packages --install-deps --sccache " +
@@ -210,19 +212,19 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
     generateJob("smoke", "docker:28.2.2", [
       prepareTestContainer(getContainerName("smoke"), result, true),
       get_build_command("run_smoke.sh") + ' --container-name ' + getContainerName("smoke")
-    ], ["publish pkg"], params, {}, { paths: [mdb_path] }, ["docker:dind"]) +
+    ], ["publish pkg"], params, {}, { paths: ["mdb"] }, ["docker:dind"]) +
     generateJob("smokelog", "docker:28.2.2", [
       reportTestStage(getContainerName("smoke"), result, "smoke")
-    ], ["smoke"], params, {}, { paths: [mdb_path] }, ["docker:dind"]) +
+    ], ["smoke"], params, {}, { paths: ["mdb"] }, ["docker:dind"]) +
     publish("smokelog") +
     generateJob("cmapi test", "docker:git", [
       prepareTestContainer(getContainerName("cmapi"), result, true),
       "apk add bash && " + get_build_command("run_cmapi_test.sh") +
       " --container-name " + getContainerName("cmapi") + " --pkg-format " + pkg_format
-    ], ["publish cmapi build"], params, { PYTHONPATH: "/usr/share/columnstore/cmapi/deps" }, { paths: [mdb_path] }, ["docker:dind"]) +
+    ], ["publish cmapi build"], params, { PYTHONPATH: "/usr/share/columnstore/cmapi/deps" }, { paths: ["mdb"] }, ["docker:dind"]) +
     generateJob("cmapilog", "docker:28.2.2", [
       reportTestStage(getContainerName("cmapi"), result, "cmapi")
-    ], ["cmapi test"], params, {}, { paths: [mdb_path] }, ["docker:dind"]) +
+    ], ["cmapi test"], params, {}, { paths: ["mdb"] }, ["docker:dind"]) +
     publish("cmapilog") +
     (if platform == "rockylinux:8" && arch == "amd64" && customBootstrapParamsKey == "gcc-toolset"
       then generateJob("dockerfile", "alpine/git:2.49.0", [
@@ -247,7 +249,7 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
           "-f docker/Dockerfile docker",
           "docker push mariadb/enterprise-columnstore-dev:" + container_tags[0]
         ] + (if event == "cron" then ["docker tag mariadb/enterprise-columnstore-dev:" + container_tags[0] + " mariadb/enterprise-columnstore-dev:" + container_tags[1], "docker push mariadb/enterprise-columnstore-dev:" + container_tags[1]] else []),
-        ["dockerfile"], params, {}, { paths: [mdb_path] }, ["docker:dind"]) +
+        ["dockerfile"], params, {}, { paths: ["mdb"] }, ["docker:dind"]) +
         generateJob("mtr", "docker:28.2.2", [
           "echo $DOCKER_PASSWORD | docker login --username $DOCKER_LOGIN --password-stdin",
           "apk add bash && " + get_build_command("run_multi_node_mtr.sh") +
@@ -256,17 +258,17 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
           DOCKER_LOGIN: "$DOCKERHUB_USER",
           DOCKER_PASSWORD: "$DOCKERHUB_PASSWORD",
           MCS_IMAGE_NAME: "mariadb/enterprise-columnstore-dev:" + container_tags[0]
-        }, { paths: [mdb_path] }, ["docker:dind"])
+        }, { paths: ["mdb"] }, ["docker:dind"])
       else generateJob("mtr", "docker:git", [
           prepareTestContainer(getContainerName("mtr"), result, true),
           'MTR_SUITE_LIST=$([ "$MTR_FULL_SUITE" == true ] && echo "' + mtr_full_set + '" || echo "$MTR_SUITE_LIST")',
           'apk add bash && ' + get_build_command("run_mtr.sh") +
           ' --container-name ' + getContainerName("mtr") + ' --distro ' + platform +
           ' --suite-list ${MTR_SUITE_LIST} --triggering-event ' + event
-        ], ["smoke"], params, { MTR_SUITE_LIST: mtr_suite_list, MTR_FULL_SUITE: "false" }, { paths: [mdb_path] }, ["docker:dind"]) +
+        ], ["smoke"], params, { MTR_SUITE_LIST: mtr_suite_list, MTR_FULL_SUITE: "false" }, { paths: ["mdb"] }, ["docker:dind"]) +
         generateJob("mtrlog", "docker:28.2.2", [
           reportTestStage(getContainerName("mtr"), result, "mtr")
-        ], ["mtr"], params, {}, { paths: [mdb_path] }, ["docker:dind"]) +
+        ], ["mtr"], params, {}, { paths: ["mdb"] }, ["docker:dind"]) +
         publish("mtrlog")
     ) +
     std.foldl(function(acc, i) acc + generateJob(regression_tests[i], "docker:git", [
@@ -281,10 +283,10 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
         REGRESSION_BRANCH_REF: "${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:-$CI_COMMIT_REF_NAME}",
         REGRESSION_REF_AUX: branch_ref,
         REGRESSION_TIMEOUT: "$REGRESSION_TIMEOUT"
-      }, { paths: [mdb_path] }, ["docker:dind"]), indexes(regression_tests), {}) +
+      }, { paths: ["mdb"] }, ["docker:dind"]), indexes(regression_tests), {}) +
     generateJob("regressionlog", "docker:28.2.2", [
       reportTestStage(getContainerName("regression"), result, "regression")
-    ], [regression_tests[std.length(regression_tests) - 1]], params, {}, { paths: [mdb_path] }, ["docker:dind"]) +
+    ], [regression_tests[std.length(regression_tests) - 1]], params, {}, { paths: ["mdb"] }, ["docker:dind"]) +
     publish("regressionlog") +
     (if event == "cron" then publish("regressionlog latest", "latest") else {})
 };
