@@ -86,7 +86,7 @@ local generateJob(stepName, image, script, dependsOn, params, variables={}, arti
 local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", customBootstrapParamsKey="", customBuildEnvCommandsMapKey="", ignoreFailureStepList=[]) = {
   local params = { branch: branch, platform: platform, event: event, arch: arch, server: server, customParams: customBootstrapParamsKey, customEnv: customBuildEnvCommandsMapKey, ignoreFailureStepList: ignoreFailureStepList },
   local pkg_format = if std.split(platform, ":")[0] == "rockylinux" then "rpm" else "deb",
-  local img = if platform == "rockylinux:8" then platform else "detravi/" + std.strReplace(std.strReplace(platform, "/", "-"), ":", ""),
+  local img = if platform == "rockylinux:8" then platform else "detravi/" + std.split(platform, ":")[0] + ":" + std.split(platform, ":")[1],
   local branch_ref = if branch == any_branch then current_branch else branch,
   local branchp = if branch == "**" then "" else branch + "/",
   local brancht = if branch == "**" then "" else branch + "-",
