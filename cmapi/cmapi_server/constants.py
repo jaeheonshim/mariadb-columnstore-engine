@@ -60,12 +60,16 @@ LOCALHOST_HOSTNAMES = {
 LOCALHOSTS = LOCALHOST_IPS.union(LOCALHOST_HOSTNAMES)
 
 CMAPI_INSTALL_PATH = '/usr/share/columnstore/cmapi/'
-CMAPI_PYTHON_BIN = os.path.join(CMAPI_INSTALL_PATH, "python/bin/python3")
-CMAPI_PYTHON_DEPS_PATH = os.path.join(CMAPI_INSTALL_PATH, "deps")
-CMAPI_PYTHON_BINARY_DEPS_PATH = os.path.join(CMAPI_PYTHON_DEPS_PATH, "bin")
-CMAPI_SINGLE_NODE_XML = os.path.join(
-    CMAPI_INSTALL_PATH, 'cmapi_server/SingleNode.xml'
-)
+CMAPI_PYTHON_BIN = os.path.join(CMAPI_INSTALL_PATH, 'python/bin/python3')
+CMAPI_PYTHON_DEPS_PATH = os.path.join(CMAPI_INSTALL_PATH, 'deps')
+CMAPI_PYTHON_BINARY_DEPS_PATH = os.path.join(CMAPI_PYTHON_DEPS_PATH, 'bin')
+CMAPI_SERVER_INSTALL_PATH = os.path.join(CMAPI_INSTALL_PATH, 'cmapi_server')
+CMAPI_SINGLE_NODE_XML = os.path.join(CMAPI_SERVER_INSTALL_PATH, 'SingleNode.xml')
+
+# default self-signed certificate paths and validity period
+CMAPI_CERT_PATH = os.path.join(CMAPI_SERVER_INSTALL_PATH, 'self-signed.crt')
+CMAPI_KEY_PATH = os.path.join(CMAPI_SERVER_INSTALL_PATH, 'self-signed.key')
+CERT_DAYS = 365
 
 class MCSProgs(str, Enum):
     STORAGE_MANAGER = 'StorageManager'
@@ -185,3 +189,11 @@ PKG_GET_VER_CMD = MultiDistroNamer(
 class ClusterModeEnum(str, Enum):
     READONLY = 'readonly'
     READWRITE = 'readwrite'
+
+
+# Constants for upgrade agent
+UPGRADE_AGENT_PORT = 8619
+UPGRADE_AGENT_START_TIMEOUT = 30  # seconds to wait for agent to start
+UPGRADE_AGENT_DEFAULT_EXEC_TIMEOUT = 30  # seconds to wait for command execution
+UPGRADE_AGENT_SERVER_TIMEOUT = 3600  # 1 hour default upgrade agent server lifetime
+UPGRADE_AGENT_MODULE = 'mcs_cluster_tool.upgrade_agent'

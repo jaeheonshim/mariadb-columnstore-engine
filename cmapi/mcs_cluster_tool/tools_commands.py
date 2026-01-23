@@ -5,8 +5,6 @@ import sys
 import time
 from datetime import datetime, timedelta
 from typing import Optional
-import ast
-from collections import Counter
 
 import requests
 import typer
@@ -20,30 +18,35 @@ from rich.table import Table
 
 from cmapi_server.constants import (
     CMAPI_CONF_PATH,
-    CMAPI_PORT,
     MCS_DATA_PATH,
     MCS_SECRETS_FILENAME,
     REQUEST_TIMEOUT,
     TRANSACTION_TIMEOUT,
 )
 from cmapi_server.controllers.api_clients import (
-    AppControllerClient, ClusterControllerClient, NodeControllerClient
+    ClusterControllerClient, NodeControllerClient
 )
-from cmapi_server.exceptions import CEJError, CMAPIBasicError
+from cmapi_server.exceptions import CEJError
 from cmapi_server.handlers.cej import CEJPasswordHandler
-from cmapi_server.helpers import get_active_nodes, get_config_parser
+from cmapi_server.helpers import get_active_nodes, get_config_parser, get_current_key
 from cmapi_server.managers.transaction import TransactionManager
 from cmapi_server.managers.upgrade.utils import ComparableVersion
 from cmapi_server.process_dispatchers.base import BaseDispatcher
-from mcs_cluster_tool.constants import MCS_COLUMNSTORE_REVIEW_SH, INSTALL_ES_LOG_FILEPATH
+from mcs_cluster_tool.constants import MCS_COLUMNSTORE_REVIEW_SH
 from mcs_cluster_tool.decorators import handle_output
 from mcs_cluster_tool.helpers import cook_sh_arg
-
-
-# install_es constants
-INSTALL_ES_CMAPI_READY_TIMEOUT = 300  # seconds to wait for CMAPI to be ready
-INSTALL_ES_CMAPI_UPGRADE_SLEEP = 6    # seconds to wait after CMAPI upgrade request
-INSTALL_ES_LONG_TRANSACTION_TIMEOUT = timedelta(days=1).total_seconds()
+from mcs_cluster_tool.install_es_helpers import (
+    INSTALL_ES_CMAPI_UPGRADE_SLEEP,
+    INSTALL_ES_LONG_TRANSACTION_TIMEOUT,
+    build_node_status_table,
+    fix_mariadb_cli_config_via_agent,
+    get_current_versions,
+    setup_install_es_logging,
+    stop_upgrade_agents_on_cluster,
+    validate_es_token_and_version,
+    wait_for_cmapi_ready,
+    wait_for_upgrade_agents_ready,
+)
 
 
 logger = logging.getLogger('mcs_cli')
@@ -533,247 +536,6 @@ def healthcheck():
     raise typer.Exit(code=0)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# install_es helper functions
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _setup_install_es_logging() -> None:
-    """Configure file logging for install_es operation."""
-    new_handler = logging.FileHandler(INSTALL_ES_LOG_FILEPATH, mode='w')
-    new_handler.setLevel(logging.DEBUG)
-    new_handler.setFormatter(logging.getLogger('mcs_cli').handlers[0].formatter)
-    for logger_name in ('', 'mcs_cli'):
-        current_logger = logging.getLogger(logger_name)
-        current_logger.addHandler(new_handler)
-
-
-def _validate_es_token_and_version(
-    node_api_client: NodeControllerClient,
-    token: str,
-    target_version: str,
-    console: Console,
-) -> str:
-    """
-    Validate ES token and target version.
-
-    Returns the resolved target version (numeric version if 'latest' was passed).
-    Exits with code 1 on validation failure.
-    """
-    node_api_client.validate_es_token(token)
-
-    if target_version == 'latest':
-        response = node_api_client.get_latest_mdb_version()
-        return response['latest_mdb_version']
-
-    try:
-        node_api_client.validate_mdb_version(token, target_version, throw_real_exp=True)
-    except requests.exceptions.HTTPError as exc:
-        resp = exc.response
-        error_msg = str(exc)
-        if resp.status_code == 422:
-            try:
-                resp_json = resp.json()
-                error_msg = resp_json.get('error', resp_json)
-            except requests.exceptions.JSONDecodeError:
-                error_msg = resp.text
-        console.print('ERROR:', style='red')
-        console.print(error_msg, style='underline')
-        console.rule()
-        raise typer.Exit(code=1)
-
-    return target_version
-
-
-def _get_current_versions(
-    cluster_api_client: ClusterControllerClient,
-    console: Console,
-    ignore_mismatch: bool,
-) -> dict:
-    """
-    Retrieve current package versions from the cluster.
-
-    Handles version mismatch across nodes, displaying a table and either
-    exiting or continuing based on ignore_mismatch flag.
-
-    Returns dict with 'server_version', 'columnstore_version', 'cmapi_version'.
-    """
-    try:
-        return cluster_api_client.get_versions()
-    except CMAPIBasicError as exc:
-        msg = exc.message
-        mismatch_marker = 'Packages versions:'
-        if mismatch_marker not in msg:
-            # Not a mismatch we recognize; rethrow for decorator to handle
-            raise
-
-        try:
-            dict_part = msg.split(mismatch_marker, 1)[1].strip()
-            packages_versions = ast.literal_eval(dict_part)
-        except Exception:  # pragma: no cover - defensive
-            console.print(f'[red]{msg}[/red]')
-            raise typer.Exit(code=1)
-
-        console.print('Detected package version mismatch across nodes:', style='yellow')
-        mismatch_table = Table('Node', 'Server', 'Columnstore', 'CMAPI')
-
-        server_vals = [v.get('server_version') for v in packages_versions.values()]
-        cs_vals = [v.get('columnstore_version') for v in packages_versions.values()]
-        cmapi_vals = [v.get('cmapi_version') for v in packages_versions.values()]
-        server_common = Counter(server_vals).most_common(1)[0][0] if server_vals else None
-        cs_common = Counter(cs_vals).most_common(1)[0][0] if cs_vals else None
-        cmapi_common = Counter(cmapi_vals).most_common(1)[0][0] if cmapi_vals else None
-
-        def style_version(val, common):
-            if val is None:
-                return '[red]-[/red]'
-            return f'[green]{val}[/green]' if val == common else f'[red]{val}[/red]'
-
-        for node, vers in sorted(packages_versions.items()):
-            mismatch_table.add_row(
-                node,
-                style_version(vers.get('server_version'), server_common),
-                style_version(vers.get('columnstore_version'), cs_common),
-                style_version(vers.get('cmapi_version'), cmapi_common),
-            )
-
-        console.print(mismatch_table)
-
-        if not ignore_mismatch:
-            console.print(
-                '[yellow]All nodes must have identical package versions before running '
-                'install-es. Please align versions (upgrade/downgrade individual nodes) '
-                'and retry, or rerun with --ignore-mismatch to force.[/yellow]'
-            )
-            raise typer.Exit(code=1)
-
-        console.print(
-            'Proceeding despite mismatch ( --ignore-mismatch ). '
-            'Using majority versions as baseline.',
-            style='yellow'
-        )
-        return {
-            'server_version': server_common or server_vals[0],
-            'columnstore_version': cs_common or cs_vals[0],
-            'cmapi_version': cmapi_common or cmapi_vals[0],
-        }
-
-
-def _wait_for_cmapi_ready(
-    active_nodes: list[str],
-    progress: Progress,
-    task_id,
-) -> tuple[dict[str, dict], bool]:
-    """
-    Poll all nodes until CMAPI is ready or timeout is reached.
-
-    Args:
-        active_nodes: List of node hostnames/IPs to check.
-        progress: Rich Progress instance for updating status.
-        task_id: The progress task ID to update.
-
-    Returns:
-        Tuple of (node_states dict, has_failures bool).
-        node_states maps node -> {'status': str, 'details': str}
-    """
-    start_time = datetime.now()
-    timeout_seconds = INSTALL_ES_CMAPI_READY_TIMEOUT
-
-    # status per node: {'status': 'PENDING'|'READY'|'ERROR'|'TIMEOUT', 'details': str}
-    node_states = {
-        node: {'status': 'PENDING', 'details': ''} for node in active_nodes
-    }
-
-    # Build a dedicated client per node
-    per_node_clients: dict[str, AppControllerClient] = {}
-    for node in active_nodes:
-        if node in ('localhost', '127.0.0.1'):
-            per_node_clients[node] = AppControllerClient()
-        else:
-            per_node_clients[node] = AppControllerClient(
-                base_url=f'https://{node}:{CMAPI_PORT}'
-            )
-
-    ready_count_prev = -1
-    while (datetime.now() - start_time) < timedelta(seconds=timeout_seconds):
-        ready_count = 0
-        for node, client_obj in per_node_clients.items():
-            # Skip nodes that already finalized (READY or ERROR)
-            if node_states[node]['status'] in ('READY', 'ERROR'):
-                if node_states[node]['status'] == 'READY':
-                    ready_count += 1
-                continue
-            try:
-                node_response = client_obj.get_ready()
-                if node_response.get('started') is True:
-                    node_states[node]['status'] = 'READY'
-                    node_states[node]['details'] = 'Service started'
-                    ready_count += 1
-            except requests.exceptions.HTTPError as err:
-                # 503 means not ready yet, anything else mark as ERROR
-                if err.response.status_code == 503:
-                    node_states[node]['details'] = 'Starting...'
-                else:
-                    node_states[node]['status'] = 'ERROR'
-                    node_states[node]['details'] = f'HTTP {err.response.status_code}'
-            except requests.exceptions.ConnectionError:
-                # still restarting
-                node_states[node]['details'] = 'Connection refused'
-            except FileNotFoundError as fnf_err:  # pragma: no cover - defensive
-                # Transient race: config file not yet created; do not fail immediately
-                missing_path = str(fnf_err).split(':')[-1].strip()
-                node_states[node]['details'] = f'Config pending ({missing_path})'
-            except Exception as err:  # pragma: no cover - defensive
-                node_states[node]['status'] = 'ERROR'
-                node_states[node]['details'] = f'Unexpected: {err}'
-
-        # Update progress description only when count changes to reduce flicker
-        if ready_count != ready_count_prev:
-            progress.update(
-                task_id,
-                description=(
-                    f'Waiting CMAPI to be ready on each node... '
-                    f'({ready_count}/{len(active_nodes)} ready)'
-                ),
-                completed=None
-            )
-            ready_count_prev = ready_count
-
-        if ready_count == len(active_nodes):
-            break
-        time.sleep(1)
-
-    # Mark TIMEOUT for nodes still pending
-    for node, state in node_states.items():
-        if state['status'] == 'PENDING':
-            state['status'] = 'TIMEOUT'
-            state['details'] = f'Not ready after {timeout_seconds}s'
-
-    # Determine if there were failures
-    failures = any(
-        state['status'] in ('TIMEOUT', 'ERROR')
-        for state in node_states.values()
-    )
-
-    return node_states, failures
-
-
-def _build_node_status_table(node_states: dict[str, dict]) -> Table:
-    """Build a Rich Table showing per-node CMAPI readiness status."""
-    status_table = Table('Node', 'Status', 'Details')
-    color_map = {
-        'READY': 'green',
-        'PENDING': 'yellow',
-        'TIMEOUT': 'red',
-        'ERROR': 'red',
-    }
-    for node, state in sorted(node_states.items()):
-        status = state['status']
-        details = state['details']
-        style = color_map.get(status, 'white')
-        status_table.add_row(node, f'[{style}]{status}[/{style}]', details)
-    return status_table
-
-
 @handle_output
 def install_es(
     token: Annotated[
@@ -810,7 +572,7 @@ def install_es(
     If the version is 'latest', it will upgrade to the latest tested version
     available.
     """
-    _setup_install_es_logging()
+    setup_install_es_logging()
     console = Console()
     console.clear()
     console.rule('[bold green][Beta] MariaDB ES Installer')
@@ -840,12 +602,12 @@ def install_es(
     cluster_api_client = ClusterControllerClient()
 
     # Validate token and resolve target version
-    target_version = _validate_es_token_and_version(
+    target_version = validate_es_token_and_version(
         node_api_client, token, target_version, console
     )
 
     # Retrieve current versions (handles mismatch display)
-    versions = _get_current_versions(cluster_api_client, console, ignore_mismatch)
+    versions = get_current_versions(cluster_api_client, console, ignore_mismatch)
     mdb_curr_ver = versions['server_version']
     mcs_curr_ver = versions['columnstore_version']
     cmapi_curr_ver = versions['cmapi_version']
@@ -879,7 +641,7 @@ def install_es(
             raise typer.Exit(code=1)
 
     if not active_nodes:
-        post_print('No active nodes found, using localhost only.', 'yellow')
+        post_print('No active nodes found, used localhost.', 'yellow')
         active_nodes.append('localhost')
 
     with Progress(
@@ -899,6 +661,52 @@ def install_es(
             completed=True
         )
         progress.stop_task(step1_stop_cluster)
+
+        # Start upgrade agents on all nodes after MCS is stopped (port 8619 is free).
+        # The agent provides a universal command execution API for post-upgrade fixes.
+        # We use the CMAPI endpoint to start agents (no SSH needed), but we'll use
+        # the agent's own /shutdown endpoint to stop them (works even after CMAPI downgrade).
+        api_key = get_current_key(get_config_parser())
+        step1_5_start_agents = progress.add_task(
+            'Starting upgrade agents on all nodes...', total=None
+        )
+
+        # Step 1: Request CMAPI to start agents on all nodes
+        try:
+            start_response = cluster_api_client.start_upgrade_agent({'timeout': 3600})
+            # Check which nodes reported success
+            start_success = {
+                node: resp.get('status') == 'started'
+                for node, resp in start_response.items()
+                if node != 'timestamp'
+            }
+        except requests.RequestException as e:
+            logger.error(f'Failed to start upgrade agents via CMAPI: {e}')
+            start_success = {}
+
+        # Step 2: Wait for agents to actually be ready (respond to health checks)
+        if start_success:
+            agent_results = wait_for_upgrade_agents_ready(
+                list(start_success.keys()), api_key, progress=progress, task_id=step1_5_start_agents
+            )
+        else:
+            agent_results = {}
+
+        agents_started = all(agent_results.values()) if agent_results else False
+        if agents_started:
+            progress.update(
+                step1_5_start_agents,
+                description='[green]Upgrade agents started ✓',
+                total=100, completed=True
+            )
+        else:
+            failed_nodes = [n for n, ok in agent_results.items() if not ok]
+            progress.update(
+                step1_5_start_agents,
+                description=f'[yellow]Upgrade agents: some nodes failed ({failed_nodes}) ⚠',
+                total=100, completed=True
+            )
+        progress.stop_task(step1_5_start_agents)
 
         step2_stop_mariadb = progress.add_task('Stopping MariaDB server...', total=None)
         # TODO: put MaxScale into maintainance mode
@@ -993,10 +801,10 @@ def install_es(
             step6_install_cmapi, description='Waiting CMAPI to be ready on each node...',
             completed=None
         )
-        node_states, failures = _wait_for_cmapi_ready(active_nodes, progress, step6_install_cmapi)
+        node_states, failures = wait_for_cmapi_ready(active_nodes, progress, step6_install_cmapi)
 
         # Build and defer the status table
-        status_table = _build_node_status_table(node_states)
+        status_table = build_node_status_table(node_states)
         post_output.append(status_table)
 
         if failures:
@@ -1033,6 +841,59 @@ def install_es(
                 step7_start_mariadb, description='[green]MariaDB server started ✓', completed=True
             )
             progress.stop_task(step7_start_mariadb)
+
+        # Fix MariaDB CLI config compatibility after downgrade.
+        # Older MariaDB versions may not support some config options
+        # (e.g., 'quick', 'quick-max-column-width') that were added in newer versions.
+        # We use the upgrade agent for this since it's independent of CMAPI version.
+        if agents_started:
+            step7_patch1_fix_mdb_cli_config = progress.add_task(
+                'Checking MariaDB clients config compatibility...', total=None
+            )
+            fix_result = fix_mariadb_cli_config_via_agent(active_nodes, api_key)
+            # Check if any node needed a fix
+            nodes_fixed = [
+                node for node, result in fix_result.items()
+                if isinstance(result, dict) and result.get('needed_fix')
+            ]
+            if nodes_fixed:
+                progress.update(
+                    step7_patch1_fix_mdb_cli_config,
+                    description='[green]MariaDB clients config fixed for downgrade ✓',
+                    total=100, completed=True
+                )
+            else:
+                progress.update(
+                    step7_patch1_fix_mdb_cli_config,
+                    description='[green]MariaDB clients config OK ✓',
+                    total=100, completed=True
+                )
+            progress.stop_task(step7_patch1_fix_mdb_cli_config)
+
+        # Stop upgrade agents BEFORE starting MCS cluster to free port 8619.
+        # The agents have served their purpose for post-upgrade fixes.
+        if agents_started:
+            step7_5_stop_agents = progress.add_task(
+                'Stopping upgrade agents...', total=None
+            )
+            stop_results = stop_upgrade_agents_on_cluster(
+                active_nodes, api_key, progress, step7_5_stop_agents
+            )
+            all_stopped = all(stop_results.values())
+            if all_stopped:
+                progress.update(
+                    step7_5_stop_agents,
+                    description='[green]Upgrade agents stopped ✓',
+                    total=100, completed=True
+                )
+            else:
+                failed_nodes = [n for n, ok in stop_results.items() if not ok]
+                progress.update(
+                    step7_5_stop_agents,
+                    description=f'[yellow]Some agents may still be running ({failed_nodes}) ⚠',
+                    total=100, completed=True
+                )
+            progress.stop_task(step7_5_stop_agents)
 
         # Start the cluster for both upgrades and downgrades (skip only on failure)
         if not failures:

@@ -6,7 +6,11 @@ import requests
 
 
 from cmapi_server.constants import (
-    CMAPI_CONF_PATH, CURRENT_NODE_CMAPI_URL, SECRET_KEY, _version
+    CMAPI_CONF_PATH,
+    CURRENT_NODE_CMAPI_URL,
+    SECRET_KEY,
+    UPGRADE_AGENT_PORT,
+    _version
 )
 from cmapi_server.exceptions import CMAPIBasicError
 from cmapi_server.helpers import get_config_parser, get_current_key
@@ -256,6 +260,18 @@ class ClusterControllerClient(BaseClient):
         """
         return self._request('PUT', 'stop-mariadb', extra)
 
+    def start_upgrade_agent(
+        self, extra: Optional[Dict[str, Any]] = None
+    ) -> Union[Dict[str, Any], Dict[str, str]]:
+        """Start upgrade agent on each node in cluster.
+
+        The upgrade agent provides a universal command execution API for
+        post-upgrade/downgrade fixes. It runs on port 8619.
+
+        :return: The response from the API.
+        """
+        return self._request('PUT', 'start-upgrade-agent', extra)
+
     def install_repo(
         self, token: str, mariadb_version: str, extra: Optional[Dict[str, Any]] = None
     ) -> Union[Dict[str, Any], Dict[str, str]]:
@@ -400,6 +416,18 @@ class NodeControllerClient(BaseClient):
         """
         return self._request('PUT', 'stop-mariadb', extra)
 
+    def start_upgrade_agent(
+        self, extra: Optional[Dict[str, Any]] = None
+    ) -> Union[Dict[str, Any], Dict[str, str]]:
+        """Start upgrade agent on a node.
+
+        The upgrade agent provides a universal command execution API for
+        post-upgrade/downgrade fixes. It runs on port 8619.
+
+        :return: The response from the API.
+        """
+        return self._request('PUT', 'start-upgrade-agent', extra)
+
     def is_process_running(
         self, process_name: str, extra: Optional[Dict[str, Any]] = None
     ) -> Union[Dict[str, Any], Dict[str, str]]:
@@ -490,7 +518,6 @@ class NodeControllerClient(BaseClient):
         return self._request('GET', 'check-shared-file', data)
 
 
-
 class AppControllerClient(BaseClient):
     """Client for the AppController API.
 
@@ -517,3 +544,108 @@ class AppControllerClient(BaseClient):
         :return: The response from the API.
         """
         return self._request('GET', 'ready', None, throw_real_exp=True)
+
+
+class UpgradeAgentClient:
+    """Client for communicating with the upgrade agent on a node."""
+
+    def __init__(
+        self,
+        host: str,
+        api_key: str,
+        port: int = UPGRADE_AGENT_PORT,
+        timeout: float = 30.0
+    ):
+        """Initialize the upgrade agent client.
+
+        :param host: Hostname or IP address of the node.
+        :param api_key: API key for authentication.
+        :param port: Port the upgrade agent is listening on.
+        :param timeout: Request timeout in seconds.
+        """
+        self.host = host
+        self.api_key = api_key
+        self.port = port
+        self.timeout = timeout
+        self.base_url = f'https://{host}:{port}'
+        self.logger = logging.getLogger('mcs_cli')
+
+    def _request(self, method: str, path: str, data: dict = None) -> dict:
+        """Make a request to the upgrade agent.
+
+        :param method: HTTP method (GET, POST).
+        :param path: URL path.
+        :param data: Request body data.
+        :return: Response JSON decoded into a dict.
+        :rtype: dict
+        :raises requests.RequestException: On request failure.
+        """
+        url = f'{self.base_url}{path}'
+        headers = {'x-api-key': self.api_key}
+
+        response = requests.request(
+            method=method,
+            url=url,
+            headers=headers,
+            json=data,
+            timeout=self.timeout,
+            verify=False  # Using self-signed certs
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+    def health_check(self) -> dict:
+        """Check if the upgrade agent is running and healthy.
+
+        :return: Health status dict with ``status``, ``timestamp``, ``hostname``.
+        :rtype: dict
+        """
+        return self._request('GET', '/health')
+
+    def execute(
+        self,
+        command: str,
+        timeout: int = 30,
+        shell: bool = False,
+        cwd: str = None
+    ) -> dict:
+        """Execute a command on the remote node.
+
+        :param command: Command to execute
+        :param timeout: Command timeout in seconds.
+        :param shell: Whether to run through a shell.
+        :param cwd: Working directory for the command.
+        :return: Dict with keys ``success``, ``returncode``, ``stdout``, ``stderr``,
+            and optionally ``error``.
+        :rtype: dict
+        """
+        data = {
+            'command': command,
+            'timeout': timeout,
+            'shell': shell,
+        }
+        if cwd:
+            data['cwd'] = cwd
+
+        return self._request('POST', '/execute', data)
+
+    def shutdown(self) -> dict:
+        """Request the upgrade agent to stop.
+
+        :return: Shutdown confirmation dict.
+        :rtype: dict
+        """
+        return self._request('POST', '/shutdown')
+
+    def is_running(self) -> bool:
+        """Check if the upgrade agent is running.
+
+        :return: ``True`` if running, otherwise ``False``.
+        :rtype: bool
+        """
+        try:
+            self.health_check()
+            return True
+        except requests.RequestException:
+            return False

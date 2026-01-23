@@ -1,5 +1,7 @@
 import logging
 import hashlib
+import os
+import shlex
 import socket
 import subprocess
 import threading
@@ -21,6 +23,8 @@ from cmapi_server.constants import (
     ALL_MCS_PROGS,
     CMAPI_PACKAGE_NAME,
     CMAPI_PORT,
+    CMAPI_PYTHON_BIN,
+    CMAPI_PYTHON_DEPS_PATH,
     DEFAULT_MCS_CONF_PATH,
     DMLPROC_SHUTDOWN_TIMEOUT,
     EM_PATH_SUFFIX,
@@ -58,7 +62,9 @@ from cmapi_server.managers.transaction import TransactionManager
 from cmapi_server.managers.upgrade.packages import PackagesManager
 from cmapi_server.managers.upgrade.repo import MariaDBESRepoManager
 from cmapi_server.node_manipulation import is_master, switch_node_maintenance
+from cmapi_server.process_dispatchers.base import BaseDispatcher
 from cmapi_server.process_dispatchers.container import ContainerDispatcher
+
 
 # Bug in pylint https://github.com/PyCQA/pylint/issues/4584
 requests.packages.urllib3.disable_warnings()  # pylint: disable=no-member
@@ -1050,6 +1056,53 @@ class ClusterController:
     @cherrypy.tools.json_in()
     @cherrypy.tools.json_out()
     @cherrypy.tools.validate_api_key()  # pylint: disable=no-member
+    def start_upgrade_agent(self):
+        """Handler for /cluster/start-upgrade-agent (PUT) endpoint.
+
+        Starts the upgrade agent process on each node in the cluster.
+        The agent provides a universal command execution API for
+        post-upgrade/downgrade fixes.
+        """
+        func_name = 'cluster_start_upgrade_agent'
+        log_begin(module_logger, func_name)
+
+        request = cherrypy.request
+        request_body = request.json
+        timeout = request_body.get('timeout', 3600)
+
+        active_nodes = get_active_nodes()
+        all_responses: dict = dict()
+        for node in active_nodes:
+            logging.debug(f'Starting upgrade agent on "{node}".')
+            client = NodeControllerClient(
+                request_timeout=REQUEST_TIMEOUT,
+                base_url=f'https://{node}:{CMAPI_PORT}'
+            )
+            try:
+                node_response = client.start_upgrade_agent({'timeout': timeout})
+                logging.debug(f'Upgrade agent started on {node}')
+                all_responses[node] = node_response
+            except Exception as err:
+                logging.error(f'Failed to start upgrade agent on {node}: {err}')
+                all_responses[node] = {
+                    'status': 'failed',
+                    'error': str(err)
+                }
+
+        response = {
+            'timestamp': str(datetime.now()),
+            **all_responses
+        }
+        logging.debug(
+            'Finished starting upgrade agent on all nodes.'
+        )
+        module_logger.debug(f'{func_name} returns {str(response)}')
+        return response
+
+    @cherrypy.tools.timeit()
+    @cherrypy.tools.json_in()
+    @cherrypy.tools.json_out()
+    @cherrypy.tools.validate_api_key()  # pylint: disable=no-member
     def put_mode_set(self):
         func_name = 'put_mode_set'
         log_begin(module_logger, func_name)
@@ -1836,6 +1889,75 @@ class NodeController:
                 exc_info=False
             )
         response = {'timestamp': str(datetime.now())}
+        module_logger.debug(f'{func_name} returns {str(response)}')
+        return response
+
+    @cherrypy.tools.timeit()
+    @cherrypy.tools.json_in()
+    @cherrypy.tools.json_out()
+    @cherrypy.tools.validate_api_key()  # pylint: disable=no-member
+    def start_upgrade_agent(self):
+        """Handler for /node/start-upgrade-agent (PUT) endpoint.
+
+        Starts the upgrade agent process on this node. The agent provides
+        a universal command execution API for post-upgrade/downgrade fixes.
+        It runs on port 8619 and uses the CMAPI API key for authentication.
+        """
+
+        func_name = 'node_start_upgrade_agent'
+        log_begin(module_logger, func_name)
+
+        request_body = cherrypy.request.json
+        timeout = request_body.get('timeout', 3600)
+
+        cfg_parser = get_config_parser()
+        api_key = get_current_key(cfg_parser)
+
+        if not api_key:
+            raise_422_error(
+                module_logger, func_name,
+                'API key not configured. Cannot start upgrade agent.'
+            )
+
+        # Log path must not depend on /var/log/mariadb/... because these
+        # directories can be removed during MariaDB/ColumnStore package changes.
+        log_dir = '/tmp/mcs-upgrade-agent'
+        try:
+            Path(log_dir).mkdir(parents=True, exist_ok=True)
+        except OSError as err:
+            raise_422_error(
+                module_logger, func_name,
+                f'Failed to create temporary log dir "{log_dir}": {err}'
+            )
+
+        log_path = os.path.join(
+            log_dir,
+            f'upgrade_agent_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+        )
+
+        my_env = os.environ.copy()
+        my_env['PYTHONPATH'] = CMAPI_PYTHON_DEPS_PATH
+        start_cmd = (
+            f'nohup {shlex.quote(CMAPI_PYTHON_BIN)} -m mcs_cluster_tool.upgrade_agent '
+            f'--api-key {shlex.quote(api_key)} '
+            f'--timeout {shlex.quote(str(timeout))} '
+        )
+
+        with open(log_path, 'w', encoding='utf-8') as log_file:
+            ok, output = BaseDispatcher.exec_command(
+                start_cmd, env=my_env, stdout=log_file, daemonize=True
+            )
+        if not ok:
+            raise_422_error(
+                module_logger, func_name,
+                f'Failed to start upgrade agent. Output: {output}'
+            )
+
+        response = {
+            'timestamp': str(datetime.now()),
+            'status': 'started',
+            'log_path': log_path,
+        }
         module_logger.debug(f'{func_name} returns {str(response)}')
         return response
 
