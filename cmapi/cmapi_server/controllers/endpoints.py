@@ -35,6 +35,8 @@ from cmapi_server.constants import (
     REQUEST_TIMEOUT,
     S3_BRM_CURRENT_PATH,
     SECRET_KEY,
+    UPGRADE_AGENT_LOG_DIR,
+    UPGRADE_AGENT_MODULE,
 )
 from cmapi_server.controllers.api_clients import NodeControllerClient
 from cmapi_server import helpers
@@ -1068,7 +1070,7 @@ class ClusterController:
 
         request = cherrypy.request
         request_body = request.json
-        timeout = request_body.get('timeout', 3600)
+        autoshtdwn_timeout = request_body.get('autoshtdwn_timeout', 0)
 
         active_nodes = get_active_nodes()
         all_responses: dict = dict()
@@ -1079,7 +1081,9 @@ class ClusterController:
                 base_url=f'https://{node}:{CMAPI_PORT}'
             )
             try:
-                node_response = client.start_upgrade_agent({'timeout': timeout})
+                node_response = client.start_upgrade_agent(
+                    {'autoshtdwn_timeout': autoshtdwn_timeout}
+                )
                 logging.debug(f'Upgrade agent started on {node}')
                 all_responses[node] = node_response
             except Exception as err:
@@ -1908,7 +1912,7 @@ class NodeController:
         log_begin(module_logger, func_name)
 
         request_body = cherrypy.request.json
-        timeout = request_body.get('timeout', 3600)
+        autoshtdwn_timeout = request_body.get('autoshtdwn_timeout', 0)
 
         cfg_parser = get_config_parser()
         api_key = get_current_key(cfg_parser)
@@ -1921,7 +1925,7 @@ class NodeController:
 
         # Log path must not depend on /var/log/mariadb/... because these
         # directories can be removed during MariaDB/ColumnStore package changes.
-        log_dir = '/tmp/mcs-upgrade-agent'
+        log_dir = UPGRADE_AGENT_LOG_DIR
         try:
             Path(log_dir).mkdir(parents=True, exist_ok=True)
         except OSError as err:
@@ -1938,15 +1942,16 @@ class NodeController:
         my_env = os.environ.copy()
         my_env['PYTHONPATH'] = CMAPI_PYTHON_DEPS_PATH
         start_cmd = (
-            f'nohup {shlex.quote(CMAPI_PYTHON_BIN)} -m mcs_cluster_tool.upgrade_agent '
+            f'nohup {shlex.quote(CMAPI_PYTHON_BIN)} -m '
+            f'{UPGRADE_AGENT_MODULE} '
             f'--api-key {shlex.quote(api_key)} '
-            f'--timeout {shlex.quote(str(timeout))} '
+            f'--autoshtdwn-timeout {shlex.quote(str(autoshtdwn_timeout))} '
         )
 
-        with open(log_path, 'w', encoding='utf-8') as log_file:
-            ok, output = BaseDispatcher.exec_command(
-                start_cmd, env=my_env, stdout=log_file, daemonize=True
-            )
+        log_file = open(log_path, 'w', encoding='utf-8')
+        ok, output = BaseDispatcher.exec_command(
+            start_cmd, env=my_env, stdout=log_file, daemonize=True
+        )
         if not ok:
             raise_422_error(
                 module_logger, func_name,

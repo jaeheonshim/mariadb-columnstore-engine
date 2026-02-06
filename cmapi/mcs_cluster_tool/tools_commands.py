@@ -39,7 +39,7 @@ from mcs_cluster_tool.install_es_helpers import (
     INSTALL_ES_CMAPI_UPGRADE_SLEEP,
     INSTALL_ES_LONG_TRANSACTION_TIMEOUT,
     build_node_status_table,
-    fix_mariadb_cli_config_via_agent,
+    call_upgrade_agents_on_all_nodes,
     get_current_versions,
     setup_install_es_logging,
     stop_upgrade_agents_on_cluster,
@@ -850,13 +850,39 @@ def install_es(
             step7_patch1_fix_mdb_cli_config = progress.add_task(
                 'Checking MariaDB clients config compatibility...', total=None
             )
-            fix_result = fix_mariadb_cli_config_via_agent(active_nodes, api_key)
-            # Check if any node needed a fix
-            nodes_fixed = [
-                node for node, result in fix_result.items()
-                if isinstance(result, dict) and result.get('needed_fix')
-            ]
-            if nodes_fixed:
+            fix_result = call_upgrade_agents_on_all_nodes(
+                nodes=active_nodes,
+                api_key=api_key,
+                method_name='fix_mariadb_cli_config',
+                progress=progress,
+                task_id=step7_patch1_fix_mdb_cli_config,
+            )
+            # Check results: needed_fix, success, removed_options, error_message
+            nodes_fixed = []
+            nodes_failed = []
+            for node, result in fix_result.items():
+                if not isinstance(result, dict):
+                    nodes_failed.append(node)
+                    continue
+                if result.get('error'):
+                    # Request failed
+                    nodes_failed.append(node)
+                elif result.get('needed_fix'):
+                    if result.get('success'):
+                        nodes_fixed.append(node)
+                    else:
+                        nodes_failed.append(node)
+                        logger.warning(
+                            f'Config fix failed on {node}: {result.get("error_message")}'
+                        )
+
+            if nodes_failed:
+                progress.update(
+                    step7_patch1_fix_mdb_cli_config,
+                    description=f'[yellow]MariaDB config fix failed on some nodes: {nodes_failed} ⚠',
+                    total=100, completed=True
+                )
+            elif nodes_fixed:
                 progress.update(
                     step7_patch1_fix_mdb_cli_config,
                     description='[green]MariaDB clients config fixed for downgrade ✓',

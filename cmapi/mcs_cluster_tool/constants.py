@@ -11,7 +11,3 @@ MCS_COLUMNSTORE_REVIEW_SH = os.path.join(
 )
 
 INSTALL_ES_LOG_FILEPATH = '/var/tmp/mcs_cli_install_es.log'
-
-COLUMNSTORE_CNF_PATH = '/etc/my.cnf.d/columnstore.cnf'
-# Config options that may not be supported in older MariaDB versions
-UNSUPPORTED_MARIADB_CLI_OPTIONS = ['quick', 'quick-max-column-width']

@@ -603,33 +603,6 @@ class UpgradeAgentClient:
         """
         return self._request('GET', '/health')
 
-    def execute(
-        self,
-        command: str,
-        timeout: int = 30,
-        shell: bool = False,
-        cwd: str = None
-    ) -> dict:
-        """Execute a command on the remote node.
-
-        :param command: Command to execute
-        :param timeout: Command timeout in seconds.
-        :param shell: Whether to run through a shell.
-        :param cwd: Working directory for the command.
-        :return: Dict with keys ``success``, ``returncode``, ``stdout``, ``stderr``,
-            and optionally ``error``.
-        :rtype: dict
-        """
-        data = {
-            'command': command,
-            'timeout': timeout,
-            'shell': shell,
-        }
-        if cwd:
-            data['cwd'] = cwd
-
-        return self._request('POST', '/execute', data)
-
     def shutdown(self) -> dict:
         """Request the upgrade agent to stop.
 
@@ -637,6 +610,17 @@ class UpgradeAgentClient:
         :rtype: dict
         """
         return self._request('POST', '/shutdown')
+
+    def fix_mariadb_cli_config(self) -> dict:
+        """Fix MariaDB CLI config by removing unsupported options.
+
+        Checks if the mariadb CLI works and patches columnstore.cnf if needed
+        by removing options that are not supported in the current version.
+
+        :return: Dict with ``needed_fix``, ``success``, ``removed_options``, ``error_message``.
+        :rtype: dict
+        """
+        return self._request('POST', '/fix-mariadb-cli-config')
 
     def is_running(self) -> bool:
         """Check if the upgrade agent is running.

@@ -1,9 +1,6 @@
 """Helper functions and constants for the install_es command."""
 import ast
 import logging
-import os
-import re
-import subprocess
 import time
 from collections import Counter
 from datetime import datetime, timedelta
@@ -25,11 +22,7 @@ from cmapi_server.controllers.api_clients import (
     UpgradeAgentClient,
 )
 from cmapi_server.exceptions import CMAPIBasicError
-from mcs_cluster_tool.constants import (
-    COLUMNSTORE_CNF_PATH,
-    INSTALL_ES_LOG_FILEPATH,
-    UNSUPPORTED_MARIADB_CLI_OPTIONS,
-)
+from mcs_cluster_tool.constants import INSTALL_ES_LOG_FILEPATH
 
 
 # install_es constants
@@ -358,140 +351,67 @@ def stop_upgrade_agents_on_cluster(
     :param api_key: API key for authentication.
     :param progress: Optional Rich Progress for status updates.
     :param task_id: Optional progress task ID.
-    :return: Dict mapping ``node -> response`` from the agent.
-    :rtype: dict[str, dict]
+    :return: Dict mapping ``node -> success``.
+    :rtype: dict[str, bool]
     """
+    logger = logging.getLogger('mcs_cli')
     results = {}
 
-    for i, node in enumerate(nodes):
+    for i, node in enumerate(nodes, start=1):
         if progress and task_id is not None:
             progress.update(
                 task_id,
-                description=f'Stopping upgrade agent on {node} ({i+1}/{len(nodes)})...'
+                description=f'Stopping upgrade agent on {node} ({i}/{len(nodes)})...'
             )
         client = UpgradeAgentClient(node, api_key)
-        results[node] = client.shutdown()
+        try:
+            client.shutdown()
+            results[node] = True
+        except requests.RequestException as e:
+            logger.warning(f'Failed to stop upgrade agent on {node}: {e}')
+            results[node] = False
 
     return results
 
 
-def execute_on_all_nodes(
+def call_upgrade_agents_on_all_nodes(
     nodes: list[str],
     api_key: str,
-    command: str,
-    timeout: int = 30,
-    shell: bool = False
+    method_name: str,
+    timeout: float = 30.0,
+    progress: Progress = None,
+    task_id=None,
 ) -> dict[str, dict]:
-    """Execute a command on all nodes via the upgrade agent.
+    """Execute an UpgradeAgentClient method on all nodes via the upgrade agent.
 
     :param nodes: List of node hostnames/IPs.
     :param api_key: API key for authentication.
-    :param command: Command to execute.
-    :param timeout: Command timeout in seconds.
-    :param shell: Whether to run through a shell.
-    :return: Dict mapping node -> execution result.
+    :param method_name: Name of the UpgradeAgentClient method to call.
+    :param timeout: Request timeout in seconds.
+    :param progress: Optional Rich Progress for status updates.
+    :param task_id: Optional progress task ID.
+    :return: Dict mapping node -> method result or error dict.
     :rtype: dict[str, dict]
     """
     logger = logging.getLogger('mcs_cli')
     results = {}
 
-    for node in nodes:
-        client = UpgradeAgentClient(node, api_key)
+    for i, node in enumerate(nodes, start=1):
+        if progress and task_id is not None:
+            progress.update(
+                task_id,
+                description=f'Calling {method_name} on {node} ({i}/{len(nodes)})...'
+            )
+
+        client = UpgradeAgentClient(node, api_key, timeout=timeout)
         try:
-            results[node] = client.execute(command, timeout=timeout, shell=shell)
+            method = getattr(client, method_name)
+            results[node] = method()
         except requests.RequestException as e:
-            logger.error(f'Failed to execute command on {node}: {e}')
+            logger.error(f'Failed to call {method_name} on {node}: {e}')
             results[node] = {
                 'success': False,
-                'returncode': -1,
-                'stdout': '',
-                'stderr': '',
                 'error': str(e)
-            }
-
-    return results
-
-
-def fix_mariadb_cli_config_via_agent(nodes: list[str], api_key: str) -> dict[str, dict]:
-    """Fix MariaDB CLI config on all nodes via the upgrade agent.
-
-    It checks whether the ``mariadb`` CLI client works and patches the config if needed.
-
-    :param nodes: List of node hostnames/IPs.
-    :param api_key: API key for authentication.
-    :return: Dict mapping node -> fix result.
-    :rtype: dict[str, dict]
-    """
-    logger = logging.getLogger('mcs_cli')
-    results = {}
-
-    for node in nodes:
-        client = UpgradeAgentClient(node, api_key)
-        result = {
-            'needed_fix': False,
-            'success': True,
-            'removed_options': [],
-            'error_message': ''
-        }
-
-        try:
-            # Step 1: Check if mariadb CLI works
-            check_result = client.execute('mariadb -V')
-
-            if check_result['success']:
-                # CLI works fine
-                logger.debug(f'MariaDB CLI works on {node}')
-                results[node] = result
-                continue
-
-            # Step 2: Parse error for unsupported options
-            error_output = check_result.get('stderr', '') or check_result.get('stdout', '')
-            pattern = r"unknown variable '([^'=]+)"
-            matches = re.findall(pattern, error_output)
-            unsupported = [opt for opt in matches if opt in UNSUPPORTED_MARIADB_CLI_OPTIONS]
-
-            if not unsupported:
-                # Unknown error, not related to config options
-                logger.warning(f'MariaDB CLI failed on {node} but not due to known options')
-                results[node] = result
-                continue
-
-            # Step 3: Patch the config file
-            result['needed_fix'] = True
-            logger.info(f'Fixing config on {node}, removing options: {unsupported}')
-
-            # Build sed command to remove the lines
-            for opt in unsupported:
-                # Remove lines that are exactly the option or option=value
-                sed_cmd = f"sed -i '/^{opt}$/d; /^{opt}=/d' {COLUMNSTORE_CNF_PATH}"
-                patch_result = client.execute(sed_cmd, shell=True, timeout=10)
-
-                if patch_result['success']:
-                    result['removed_options'].append(opt)
-                else:
-                    result['success'] = False
-                    result['error_message'] = patch_result.get('stderr', 'sed failed')
-                    break
-
-            # Step 4: Verify the fix
-            if result['success'] and result['removed_options']:
-                verify_result = client.execute(
-                    ['mariadb', '-V'],
-                    timeout=30
-                )
-                if not verify_result['success']:
-                    result['success'] = False
-                    result['error_message'] = 'Config patched but CLI still fails'
-
-            results[node] = result
-
-        except requests.RequestException as e:
-            logger.error(f'Failed to fix config on {node}: {e}')
-            results[node] = {
-                'needed_fix': False,
-                'success': False,
-                'removed_options': [],
-                'error_message': str(e)
             }
 
     return results

@@ -66,7 +66,7 @@ class CertificateManager():
 
         with open(CMAPI_CERT_PATH, 'wb') as f:
             f.write(cert.public_bytes(serialization.Encoding.PEM))
-        logging.info('Created self signed sertificate for CMAPI API access.')
+        logging.info('Created self signed certificate for CMAPI API access.')
 
     @staticmethod
     def create_self_signed_certificate_if_not_exist() -> None:
@@ -94,7 +94,7 @@ class CertificateManager():
     def renew_certificate() -> None:
         """Creates new self signed certificate.
 
-        Creates self-signed cetificate if certificate doesn't exist or
+        Creates self-signed certificate if certificate doesn't exist or
         expires in a 1 day or less.
         """
         if CertificateManager.days_before_expire() <= 0:

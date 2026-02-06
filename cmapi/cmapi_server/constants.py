@@ -196,4 +196,8 @@ UPGRADE_AGENT_PORT = 8619
 UPGRADE_AGENT_START_TIMEOUT = 30  # seconds to wait for agent to start
 UPGRADE_AGENT_DEFAULT_EXEC_TIMEOUT = 30  # seconds to wait for command execution
 UPGRADE_AGENT_SERVER_TIMEOUT = 3600  # 1 hour default upgrade agent server lifetime
-UPGRADE_AGENT_MODULE = 'mcs_cluster_tool.upgrade_agent'
+UPGRADE_AGENT_MODULE = 'cmapi_server.managers.upgrade.upgrade_agent'
+UPGRADE_AGENT_LOG_DIR = '/tmp/mcs-upgrade-agent'
+MDB_COLUMNSTORE_CNF_PATH = '/etc/my.cnf.d/columnstore.cnf'
+# Config options that may not be supported in older MariaDB versions
+UNSUPPORTED_MARIADB_CLI_OPTIONS = ['quick', 'quick-max-column-width']
