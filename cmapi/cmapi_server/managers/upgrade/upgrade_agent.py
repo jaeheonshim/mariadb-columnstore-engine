@@ -40,16 +40,42 @@ from pydantic import BaseModel
 from cmapi_server.constants import (
     MDB_COLUMNSTORE_CNF_PATH,
     UNSUPPORTED_MARIADB_CLI_OPTIONS,
+    UPGRADE_AGENT_LOG_DIR,
     UPGRADE_AGENT_PORT,
     UPGRADE_AGENT_SERVER_TIMEOUT,
 )
 
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+
+def _setup_logging(log_file: str | None) -> logging.Logger:
+    """Configure upgrade agent logging.
+
+    If log_file is provided, logs are written there and (also) to stderr.
+    Additionally attaches the same handlers to uvicorn loggers so agent logs
+    and HTTP access/error logs end up in the same place.
+    """
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file:
+        handlers.insert(0, logging.FileHandler(log_file, encoding='utf-8'))
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # Replace any pre-configured handlers to avoid duplicate logging.
+    root.handlers = handlers
+    for h in handlers:
+        h.setFormatter(logging.Formatter(LOG_FORMAT))
+
+    # Ensure uvicorn loggers use the same handlers.
+    for name in ('uvicorn', 'uvicorn.error', 'uvicorn.access'):
+        uv_logger = logging.getLogger(name)
+        uv_logger.handlers = handlers
+        uv_logger.propagate = False
+
+    return logging.getLogger('upgrade_agent')
+
+
 logger = logging.getLogger('upgrade_agent')
 
 
@@ -345,8 +371,41 @@ def main():
         '--autoshtdwn-timeout', type=int, default=UPGRADE_AGENT_SERVER_TIMEOUT,
         help=f'Server will automatically shutdown after timeout in seconds (default: {UPGRADE_AGENT_SERVER_TIMEOUT})'
     )
+    parser.add_argument(
+        '--log-file',
+        default=None,
+        help=(
+            'Log file path. If not specified, logs are written to '
+            f'"{UPGRADE_AGENT_LOG_DIR}" with an auto-generated filename.'
+        ),
+    )
 
     args = parser.parse_args()
+
+    # Configure logging as early as possible.
+    log_path: str | None
+    if args.log_file:
+        log_path = args.log_file
+        try:
+            parent = os.path.dirname(log_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        except OSError as exc:
+            print(f'Failed to create log directory for "{log_path}": {exc}', file=sys.stderr)
+            sys.exit(1)
+    else:
+        try:
+            os.makedirs(UPGRADE_AGENT_LOG_DIR, exist_ok=True)
+        except OSError as exc:
+            print(f'Failed to create log dir "{UPGRADE_AGENT_LOG_DIR}": {exc}', file=sys.stderr)
+            sys.exit(1)
+        log_path = os.path.join(
+            UPGRADE_AGENT_LOG_DIR,
+            f'upgrade_agent_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log',
+        )
+
+    logger = _setup_logging(log_path)
+    logger.info('Logging to %s', log_path)
 
     server = UpgradeAgentServer(
         api_key=args.api_key,

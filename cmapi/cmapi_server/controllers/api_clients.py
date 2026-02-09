@@ -39,6 +39,17 @@ class BaseClient:
         self.base_url = base_url
         self.request_timeout = request_timeout
         self.cmd_class = None
+        self.url_template = f'{self.base_url}/cmapi/{_version}/{{cmd_class}}/{{endpoint}}'
+
+    def _build_url(self, endpoint: str) -> str:
+        """Build the URL for the given endpoint.
+
+        Subclasses can override this method to customize URL construction.
+
+        :param endpoint: The API endpoint to call.
+        :return: The full URL for the request.
+        """
+        return self.url_template.format(cmd_class=self.cmd_class, endpoint=endpoint)
 
     def _request(
         self, method: str, endpoint: str, data: Optional[Dict[str, Any]] = None,
@@ -51,8 +62,7 @@ class BaseClient:
         :param data: The data to send with the request.
         :return: The response from the API.
         """
-
-        url = f'{self.base_url}/cmapi/{_version}/{self.cmd_class}/{endpoint}'
+        url = self._build_url(endpoint)
         cmapi_cfg_parser = get_config_parser(CMAPI_CONF_PATH)
         key = get_current_key(cmapi_cfg_parser)
         headers = {'x-api-key': key}
@@ -524,19 +534,14 @@ class AppControllerClient(BaseClient):
     This class provides methods for interacting with a cmapi special management
     API.
     """
-    def __init__(
-        self, base_url: str = CURRENT_NODE_CMAPI_URL, request_timeout: Optional[float] = None
-    ):
-        """Initialize the NodeControllerClient with the base URL.
 
-        :param base_url: The base URL for the API endpoints,
-                         defaults to CURRENT_NODE_CMAPI_URL
-        :type base_url: str, optional
-        :param request_timeout: request timeout, defaults to None
-        :type request_timeout: Optional[float], optional
+    def _build_url(self, endpoint: str) -> str:
+        """Build URL for AppController endpoints.
+
+        :param endpoint: The API endpoint to call.
+        :return: The full URL for the request.
         """
-        super().__init__(base_url, request_timeout)
-        self.cmd_url = f'{self.base_url}/cmapi/'
+        return f'{self.base_url}/cmapi/{endpoint}'
 
     def get_ready(self) -> Union[Dict[str, Any], Dict[str, str]]:
         """Get CMAPI ready or not.

@@ -66,6 +66,7 @@ from cmapi_server.managers.upgrade.repo import MariaDBESRepoManager
 from cmapi_server.node_manipulation import is_master, switch_node_maintenance
 from cmapi_server.process_dispatchers.base import BaseDispatcher
 from cmapi_server.process_dispatchers.container import ContainerDispatcher
+from cmapi_server.process_dispatchers.systemd import SystemdDispatcher
 
 
 # Bug in pylint https://github.com/PyCQA/pylint/issues/4584
@@ -1357,10 +1358,13 @@ class ClusterController:
             client = NodeControllerClient(
                 base_url=f'https://{node}:{CMAPI_PORT}'
             )
-            node_response = client.install_repo(
-                token=token,
-                mariadb_version=mariadb_version
-            )
+            try:
+                node_response = client.install_repo(
+                    token=token,
+                    mariadb_version=mariadb_version
+                )
+            except CMAPIBasicError as err:
+                raise_422_error(module_logger, func_name, err.message)
             logging.debug(f'ES repo installed on {node}')
             all_responses[node] = node_response
         response = {
@@ -1923,35 +1927,69 @@ class NodeController:
                 'API key not configured. Cannot start upgrade agent.'
             )
 
-        # Log path must not depend on /var/log/mariadb/... because these
-        # directories can be removed during MariaDB/ColumnStore package changes.
-        log_dir = UPGRADE_AGENT_LOG_DIR
-        try:
-            Path(log_dir).mkdir(parents=True, exist_ok=True)
-        except OSError as err:
-            raise_422_error(
-                module_logger, func_name,
-                f'Failed to create temporary log dir "{log_dir}": {err}'
-            )
-
-        log_path = os.path.join(
-            log_dir,
-            f'upgrade_agent_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
-        )
-
         my_env = os.environ.copy()
         my_env['PYTHONPATH'] = CMAPI_PYTHON_DEPS_PATH
-        start_cmd = (
-            f'nohup {shlex.quote(CMAPI_PYTHON_BIN)} -m '
-            f'{UPGRADE_AGENT_MODULE} '
-            f'--api-key {shlex.quote(api_key)} '
-            f'--autoshtdwn-timeout {shlex.quote(str(autoshtdwn_timeout))} '
-        )
 
-        log_file = open(log_path, 'w', encoding='utf-8')
-        ok, output = BaseDispatcher.exec_command(
-            start_cmd, env=my_env, stdout=log_file, daemonize=True
+        # NOTE: When CMAPI is started by systemd, child processes inherit its
+        # cgroup. During CMAPI upgrade/restart systemd may kill everything in
+        # the service cgroup, including the upgrade agent.
+        #
+        # To make the agent survive, start it via `systemd-run` as a transient
+        # scope unit (new cgroup).
+        upgrade_agent_run_cmd = [
+            CMAPI_PYTHON_BIN,
+            '-m',
+            UPGRADE_AGENT_MODULE,
+            '--api-key', api_key,
+            '--autoshtdwn-timeout', str(autoshtdwn_timeout),
+            '--log-file', os.path.join(UPGRADE_AGENT_LOG_DIR, 'upgrade_agent.log'),
+        ]
+
+        if not MCSProcessManager.dispatcher_name == 'systemd':
+            raise_422_error(
+                module_logger,
+                func_name,
+                'Non-systemd installations not supported for upgrade agent.',
+                exc_info=False,
+            )
+
+        # Use a stable unit name so it can be managed predictably.
+        # systemd will refuse to start if an active unit with the same
+        # name already exists.
+        unit_name = 'cmapi-upgrade-agent'
+
+        # If the unit is already active, treat this call as idempotent.
+        already_running = SystemdDispatcher.is_service_running(
+            f'{unit_name}.scope', use_sudo=False
         )
+        ok: bool = False
+        output: str = ''
+        if already_running:
+            module_logger.info(
+                'Upgrade agent unit already active (%s.scope); skipping start',
+                unit_name,
+            )
+        else:
+            # Use a transient *scope* unit: it becomes independent from
+            # CMAPI's service cgroup but keeps "run this process" semantics.
+            # --collect ensures systemd cleans up the unit after exit.
+            start_cmd = ' '.join(
+                [
+                    'systemd-run',
+                    '--scope',
+                    f'--unit={shlex.quote(unit_name)}',
+                    '--collect',
+                    '--property=KillMode=process',
+                    '--quiet',
+                    *[shlex.quote(a) for a in upgrade_agent_run_cmd],
+                ]
+            )
+            module_logger.info(
+                'Starting upgrade agent via systemd-run: %s', unit_name
+            )
+            ok, output = BaseDispatcher.exec_command(
+                start_cmd, env=my_env, daemonize=True
+            )
         if not ok:
             raise_422_error(
                 module_logger, func_name,
@@ -1960,8 +1998,7 @@ class NodeController:
 
         response = {
             'timestamp': str(datetime.now()),
-            'status': 'started',
-            'log_path': log_path,
+            'status': 'already_running' if already_running else 'started',
         }
         module_logger.debug(f'{func_name} returns {str(response)}')
         return response
