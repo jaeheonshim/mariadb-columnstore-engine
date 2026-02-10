@@ -596,6 +596,17 @@ class UpgradeAgentClient:
             timeout=self.timeout,
             verify=False  # Using self-signed certs
         )
+        if not response.ok:
+            # Log the response body so the caller can see the actual error
+            # returned by the upgrade agent (e.g. traceback on 500).
+            try:
+                body = response.json()
+            except Exception:
+                body = response.text
+            self.logger.error(
+                'Upgrade agent %s %s returned %d: %s',
+                method, url, response.status_code, body,
+            )
         response.raise_for_status()
         return response.json()
 

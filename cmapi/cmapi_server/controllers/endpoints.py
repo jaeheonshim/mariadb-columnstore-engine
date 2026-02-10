@@ -1969,6 +1969,7 @@ class NodeController:
                 'Upgrade agent unit already active (%s.scope); skipping start',
                 unit_name,
             )
+            ok = True
         else:
             # Use a transient *scope* unit: it becomes independent from
             # CMAPI's service cgroup but keeps "run this process" semantics.
