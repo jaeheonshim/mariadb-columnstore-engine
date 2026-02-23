@@ -1,0 +1,154 @@
+#
+# MCOL-6298: Query Accelerator | Easier to turn on and off
+# Test the queryacc convenience stored procedures added by install_mcs_mysql.sh
+#
+--source ../include/have_columnstore.inc
+--disable_query_log
+
+--echo #
+--echo # Setup: create the queryacc database and stored routines
+--echo # (mirrors what install_mcs_mysql.sh.in does)
+--echo #
+
+CREATE DATABASE IF NOT EXISTS queryacc;
+
+DELIMITER //;
+CREATE OR REPLACE FUNCTION queryacc.enable_queryacc() RETURNS TEXT NOT DETERMINISTIC
+BEGIN
+  DECLARE old_settings TEXT;
+  SET old_settings = @@optimizer_switch;
+  SET @@columnstore_unstable_optimizer='on';
+  SET @@optimizer_switch='index_merge=off,index_merge_union=off,index_merge_sort_union=off,index_merge_intersection=off,index_merge_sort_intersection=off,index_condition_pushdown=off,derived_merge=off,derived_with_keys=off,firstmatch=off,loosescan=off,materialization=on,in_to_exists=off,semijoin=off,partial_match_rowid_merge=off,partial_match_table_scan=off,subquery_cache=off,mrr=off,mrr_cost_based=off,mrr_sort_keys=off,outer_join_with_cache=off,semijoin_with_cache=off,join_cache_incremental=off,join_cache_hashed=off,join_cache_bka=off,optimize_join_buffer_size=off,table_elimination=off,extended_keys=off,exists_to_in=off,orderby_uses_equalities=off,condition_pushdown_for_derived=on,split_materialized=off,condition_pushdown_for_subquery=off,rowid_filter=off,condition_pushdown_from_having=on,not_null_range_scan=off,hash_join_cardinality=off,cset_narrowing=off,sargable_casefold=off';
+  SET @@columnstore_query_accel_parallel_factor=5;
+  RETURN old_settings;
+END//
+DELIMITER ;//
+
+DELIMITER //;
+CREATE OR REPLACE PROCEDURE queryacc.disable_queryacc(IN old_settings TEXT)
+BEGIN
+  SET @@optimizer_switch = old_settings;
+  SET @@columnstore_unstable_optimizer='off';
+END//
+DELIMITER ;//
+
+DELIMITER //;
+CREATE OR REPLACE PROCEDURE queryacc.with_queryacc(IN query TEXT)
+BEGIN
+  DECLARE old_settings TEXT;
+  SET old_settings = enable_queryacc();
+  BEGIN
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+      CALL disable_queryacc(old_settings);
+      RESIGNAL;
+    END;
+    EXECUTE IMMEDIATE query;
+  END;
+  CALL disable_queryacc(old_settings);
+END//
+DELIMITER ;//
+
+--echo #
+--echo # Test 1: Verify routines exist in queryacc schema
+--echo #
+SELECT ROUTINE_SCHEMA, ROUTINE_NAME, ROUTINE_TYPE
+  FROM information_schema.ROUTINES
+  WHERE ROUTINE_SCHEMA = 'queryacc'
+  ORDER BY ROUTINE_NAME;
+
+--echo #
+--echo # Test 2: enable_queryacc() changes session variables correctly
+--echo #
+SET @old_settings = queryacc.enable_queryacc();
+
+SELECT @@columnstore_unstable_optimizer AS unstable_optimizer_after_enable;
+SELECT @@columnstore_query_accel_parallel_factor AS parallel_factor_after_enable;
+SELECT @@optimizer_switch LIKE '%index_merge=off%' AS optimizer_switch_changed;
+
+--echo #
+--echo # Test 3: disable_queryacc() restores optimizer_switch
+--echo #
+CALL queryacc.disable_queryacc(@old_settings);
+
+SELECT @@columnstore_unstable_optimizer AS unstable_optimizer_after_disable;
+SELECT @@optimizer_switch LIKE '%index_merge=off%' AS optimizer_switch_still_off;
+
+--echo #
+--echo # Test 4: enable/disable round-trip preserves original optimizer_switch
+--echo #
+SET @@optimizer_switch='index_merge=on';
+SELECT @@optimizer_switch LIKE '%index_merge=on%' AS before_enable;
+
+SET @saved = queryacc.enable_queryacc();
+SELECT @@optimizer_switch LIKE '%index_merge=off%' AS during_enable;
+
+CALL queryacc.disable_queryacc(@saved);
+SELECT @@optimizer_switch LIKE '%index_merge=on%' AS after_disable;
+
+--echo #
+--echo # Test 5: parallel_factor after enable/disable round-trip
+--echo #
+SET @@columnstore_query_accel_parallel_factor=50;
+SELECT @@columnstore_query_accel_parallel_factor AS pf_before_enable;
+
+SET @saved2 = queryacc.enable_queryacc();
+SELECT @@columnstore_query_accel_parallel_factor AS pf_during_enable;
+
+CALL queryacc.disable_queryacc(@saved2);
+SELECT @@columnstore_query_accel_parallel_factor AS pf_after_disable;
+
+--echo #
+--echo # Test 6: unstable_optimizer after enable/disable when already ON
+--echo #
+SET @@columnstore_unstable_optimizer='on';
+SELECT @@columnstore_unstable_optimizer AS unstable_before_enable;
+
+SET @saved3 = queryacc.enable_queryacc();
+CALL queryacc.disable_queryacc(@saved3);
+SELECT @@columnstore_unstable_optimizer AS unstable_after_disable_was_on;
+
+# Reset to default
+SET @@columnstore_unstable_optimizer='off';
+SET @@columnstore_query_accel_parallel_factor=5;
+
+--echo #
+--echo # Test 7: with_queryacc() from queryacc database
+--echo #
+
+--disable_warnings
+DROP DATABASE IF EXISTS mcol6298_test;
+--enable_warnings
+CREATE DATABASE mcol6298_test;
+
+CREATE TABLE mcol6298_test.t1 (id INT, val INT) ENGINE=Columnstore;
+INSERT INTO mcol6298_test.t1 VALUES (1, 10), (2, 20), (3, 30);
+
+USE queryacc;
+CALL queryacc.with_queryacc('SELECT * FROM mcol6298_test.t1 ORDER BY id');
+
+SELECT @@columnstore_unstable_optimizer AS unstable_after_with_queryacc_ok;
+
+--echo #
+--echo # Test 8: with_queryacc() error handling — bad query
+--echo #
+--error ER_NO_SUCH_TABLE
+CALL queryacc.with_queryacc('SELECT * FROM mcol6298_test.nonexistent_table');
+
+SELECT @@columnstore_unstable_optimizer AS unstable_after_error_handling;
+
+--echo #
+--echo # Test 9: with_queryacc() from a non-queryacc database
+--echo #
+USE mcol6298_test;
+
+CALL queryacc.with_queryacc('SELECT * FROM mcol6298_test.t1 ORDER BY id');
+
+SELECT @@columnstore_unstable_optimizer AS unstable_after_with_queryacc_other_db;
+
+--echo #
+--echo # Cleanup
+--echo #
+DROP TABLE mcol6298_test.t1;
+DROP DATABASE mcol6298_test;
+DROP DATABASE queryacc;
