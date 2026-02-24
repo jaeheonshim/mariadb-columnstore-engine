@@ -1,8 +1,4 @@
 #
-# Setup: create the queryacc database and stored routines
-# (mirrors what install_mcs_mysql.sh.in does)
-#
-#
 # Test 1: Verify routines exist in queryacc schema
 #
 ROUTINE_SCHEMA	ROUTINE_NAME	ROUTINE_TYPE
