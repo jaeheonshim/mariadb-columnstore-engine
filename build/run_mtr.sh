@@ -101,8 +101,3 @@ MTR_RUN_COMMAND="cd ${MTR_PATH} && ./mtr ${EXTERN_FLAG} --force --print-core=det
                                   --suite=columnstore/${MTR_SUITE_LIST//,/,columnstore/}"
 
 execInnerDocker "${CONTAINER_NAME}" "${MTR_RUN_COMMAND}"
-
-# TODO: Remove after verifying MCOL-6298 test works with --extern
-message "Running MCOL-6298 test with --extern..."
-MTR_EXTERN_TEST="cd ${MTR_PATH} && ./mtr --extern socket=${SOCKET_PATH} --force --print-core=detailed --print-method=gdb --suite=columnstore/future MCOL-6298-queryacc-convenience"
-execInnerDocker "${CONTAINER_NAME}" "${MTR_EXTERN_TEST}"

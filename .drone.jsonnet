@@ -293,24 +293,22 @@ local Pipeline(branch, platform, event, arch="amd64", server="10.6-enterprise", 
       status: ["success", "failure"],
     },
   },
+  // TODO: Restore normal mtr step after verifying MCOL-6298
   mtr:: {
     name: "mtr",
     depends_on: ["smoke"],
     image: "docker:git",
     volumes: [pipeline._volumes.docker, pipeline._volumes.mdb],
-    environment: {
-      MTR_FULL_SUITE: "${MTR_FULL_SUITE:-false}",
-    },
     commands: [
       prepareTestContainer(getContainerName("mtr"), result, true, true, true),
 
-      "apk add bash &&" +
-      get_build_command("run_mtr.sh") +
-      " --container-name " + getContainerName("mtr") +
-      " --distro " + platform +
-      " --triggering-event " + event +
-      " --full-mtr $${MTR_FULL_SUITE}" +
-      if std.endsWith(result, "ASan") then " --run-as-extern" else "",
+      execInnerDocker("bash -c 'SOCKET=$(mariadb -N -s -e \"SELECT @@socket\") && " +
+        "cd /usr/share/mysql-test && " +
+        "ln -sf /usr/share/mysql-test/plugin/columnstore/columnstore suite/columnstore 2>/dev/null; " +
+        "cd /usr/share/mariadb-test && " +
+        "ln -sf /usr/share/mariadb-test/plugin/columnstore/columnstore suite/columnstore 2>/dev/null; " +
+        "./mtr --extern socket=$SOCKET --force --suite=columnstore/future MCOL-6298-queryacc-convenience'",
+        getContainerName("mtr")),
     ],
     [if (std.member(ignoreFailureStepList, "mtr")) then "failure"]: "ignore",
 
